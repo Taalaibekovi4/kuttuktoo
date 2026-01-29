@@ -1,11 +1,9 @@
 import React, { useEffect, useRef, useState } from "react";
 import axios from "axios";
 
-import VideoMob from "./acces/video_mob.mp4";
-import VideoNote from "./acces/video_note.mp4";
-
 /**
  * baseURL: "" — чтобы работал Vite proxy (/api -> Django)
+ * В проде ты можешь поставить baseURL: "https://kuttuktoo.kg"
  */
 const api = axios.create({
   baseURL: "",
@@ -25,14 +23,18 @@ const App = () => {
   const [apiError, setApiError] = useState("");
   const [loading, setLoading] = useState(true);
 
-  // ✅ старт: autoplay всегда БЕЗ ЗВУКА
-  // звук включаем только по клику (и иконка исчезает)
+  // ✅ Hero videos from backend (mobile_src / desktop_src)
+  const [heroVideos, setHeroVideos] = useState({
+    mobile_src: "",
+    desktop_src: "",
+  });
+
+  // ✅ autoplay всегда БЕЗ ЗВУКА, звук включаем только по клику
   const [soundEnabled, setSoundEnabled] = useState(false);
 
   const normalizeUrl = (u) => {
     const s = String(u || "").trim();
     if (!s) return "";
-    if (s.startsWith("/")) return s;
     return s;
   };
 
@@ -46,16 +48,16 @@ const App = () => {
       setApiError("");
 
       try {
-        const [sRes, oRes] = await Promise.all([
+        const [sRes, oRes, hvRes] = await Promise.all([
           api.get("/api/settings/"),
           api.get("/api/offers/"),
+          api.get("/api/offers/videos/"),
         ]);
 
         if (cancelled) return;
 
+        // ===== settings =====
         const s = sRes?.data || {};
-        const list = Array.isArray(oRes?.data) ? oRes.data : [];
-
         setSettings({
           brand_name: String(s.brand_name || ""),
           subtitle: String(s.subtitle || ""),
@@ -64,6 +66,8 @@ const App = () => {
           logo_url: normalizeUrl(s.logo_url || ""),
         });
 
+        // ===== offers =====
+        const list = Array.isArray(oRes?.data) ? oRes.data : [];
         const mapped = list
           .map((x) => {
             const vidsRaw = Array.isArray(x.videos) ? x.videos : [];
@@ -98,6 +102,17 @@ const App = () => {
         mapped.sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
         setOffers(mapped);
 
+        // ===== hero videos =====
+        const hvList = Array.isArray(hvRes?.data) ? hvRes.data : [];
+        const first = hvList?.[0] || {};
+        const mSrc = normalizeUrl(first.mobile_src || "");
+        const dSrc = normalizeUrl(first.desktop_src || "");
+
+        setHeroVideos({
+          mobile_src: mSrc,
+          desktop_src: dSrc,
+        });
+
         if (!mapped.length) {
           setApiError("Бекден тарифтер келбеди (пустой список).");
         }
@@ -108,6 +123,7 @@ const App = () => {
               e.response?.statusText || ""
             )}`
           : `API unreachable: ${String(e?.message || "unknown")}`;
+
         if (!cancelled) setApiError(msg);
       } finally {
         if (!cancelled) setLoading(false);
@@ -194,7 +210,6 @@ const App = () => {
       const p = v.play?.();
       if (p && typeof p.then === "function") await p;
     } catch (e) {
-      // autoplay может блокнуться — но у нас muted autoplay обычно проходит
       console.error(e);
     }
   };
@@ -203,11 +218,9 @@ const App = () => {
     const active = getActiveHeroVideo();
     const inactive = getInactiveHeroVideo();
 
-    // ✅ чтобы не играли оба
     safePause(inactive);
 
     if (showHeader) {
-      // если ушли вниз — стопаем оба (как было у тебя)
       [heroVideoMobRef.current, heroVideoNoteRef.current].forEach((v) => {
         if (!v) return;
         try {
@@ -219,17 +232,15 @@ const App = () => {
       return;
     }
 
-    // ✅ autoplay всегда muted, звук только по клику
     if (active) {
       try {
-        active.muted = !soundEnabled ? true : false;
+        active.muted = !soundEnabled;
         active.volume = 1;
       } catch {}
       await safePlay(active);
     }
   };
 
-  // ✅ автозапуск на старте + при ресайзе/смене режима
   useEffect(() => {
     let raf = 0;
 
@@ -247,9 +258,8 @@ const App = () => {
       window.removeEventListener("resize", onResize);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showHeader, soundEnabled]);
+  }, [showHeader, soundEnabled, heroVideos.mobile_src, heroVideos.desktop_src]);
 
-  // ✅ клик по баннеру -> включить звук и продолжить проигрывание
   const enableHeroSound = async () => {
     if (soundEnabled) return;
     setSoundEnabled(true);
@@ -257,7 +267,6 @@ const App = () => {
     const active = getActiveHeroVideo();
     const inactive = getInactiveHeroVideo();
 
-    // второй гарантированно выключаем
     safePause(inactive);
     if (inactive) {
       try {
@@ -319,12 +328,32 @@ const App = () => {
     return undefined;
   }, [modalOpen, activeVideo]);
 
-  // ===== Carousel =====
+  // ===== Carousel (drag mouse + клики) =====
   const carouselRef = useRef(null);
   const positionsRef = useRef([]);
   const animRef = useRef(0);
   const isAnimatingRef = useRef(false);
   const [activeIndex, setActiveIndex] = useState(0);
+
+  const dragRef = useRef({
+    isDown: false,
+    startX: 0,
+    startLeft: 0,
+    moved: false,
+    captured: false,
+    pointerId: null,
+  });
+
+  const blockClickRef = useRef(false);
+  const blockClickTimerRef = useRef(0);
+
+  const setBlockClick = () => {
+    blockClickRef.current = true;
+    if (blockClickTimerRef.current) clearTimeout(blockClickTimerRef.current);
+    blockClickTimerRef.current = setTimeout(() => {
+      blockClickRef.current = false;
+    }, 220);
+  };
 
   const collectPositions = () => {
     const el = carouselRef.current;
@@ -397,18 +426,6 @@ const App = () => {
     animRef.current = requestAnimationFrame(tick);
   };
 
-  const scrollToIndex = (idx) => {
-    collectPositions();
-    const pos = positionsRef.current;
-    if (!pos.length) return;
-
-    const next = Math.max(0, Math.min(pos.length - 1, idx));
-    setActiveIndex(next);
-
-    const targetLeft = next === 0 ? 0 : pos[next] || 0;
-    animateScrollTo(targetLeft, 520);
-  };
-
   useEffect(() => {
     let raf1 = 0;
     let raf2 = 0;
@@ -454,6 +471,90 @@ const App = () => {
       window.removeEventListener("resize", onResize);
     };
   }, [offers.length]);
+
+  useEffect(() => {
+    return () => {
+      if (blockClickTimerRef.current) clearTimeout(blockClickTimerRef.current);
+    };
+  }, []);
+
+  const onCarouselPointerDown = (e) => {
+    const el = carouselRef.current;
+    if (!el) return;
+
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+
+    stopAnimation();
+
+    dragRef.current.isDown = true;
+    dragRef.current.startX = e.clientX;
+    dragRef.current.startLeft = el.scrollLeft;
+    dragRef.current.moved = false;
+    dragRef.current.captured = false;
+    dragRef.current.pointerId = e.pointerId;
+  };
+
+  const onCarouselPointerMove = (e) => {
+    const el = carouselRef.current;
+    if (!el) return;
+    if (!dragRef.current.isDown) return;
+    if (dragRef.current.pointerId !== e.pointerId) return;
+
+    const dx = e.clientX - dragRef.current.startX;
+    const absDx = Math.abs(dx);
+
+    if (!dragRef.current.moved && absDx > 6) {
+      dragRef.current.moved = true;
+
+      if (!dragRef.current.captured) {
+        try {
+          el.setPointerCapture?.(e.pointerId);
+          dragRef.current.captured = true;
+        } catch {}
+      }
+
+      el.classList.add("is-dragging");
+    }
+
+    if (!dragRef.current.moved) return;
+
+    el.scrollLeft = dragRef.current.startLeft - dx;
+    e.preventDefault?.();
+  };
+
+  const finishDrag = () => {
+    const el = carouselRef.current;
+    if (!el) return;
+
+    const wasMoved = dragRef.current.moved;
+
+    dragRef.current.isDown = false;
+    dragRef.current.pointerId = null;
+
+    el.classList.remove("is-dragging");
+
+    if (wasMoved) setBlockClick();
+
+    collectPositions();
+    setActiveIndex(getNearestIndex());
+  };
+
+  const onCarouselPointerUp = () => {
+    if (!dragRef.current.isDown) return;
+    finishDrag();
+  };
+
+  const onCarouselPointerLeave = () => {
+    if (!dragRef.current.isDown) return;
+    finishDrag();
+  };
+
+  const onCarouselClickCapture = (e) => {
+    if (blockClickRef.current) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  };
 
   const VideoThumb = ({ v, rounded = "rounded-none" }) => {
     const [ready, setReady] = useState(false);
@@ -511,15 +612,19 @@ const App = () => {
   const brand = settings.brand_name || "kuttuktoo";
   const logoUrl = settings.logo_url;
 
+  const heroMobSrc = heroVideos.mobile_src;
+  const heroDeskSrc = heroVideos.desktop_src;
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <style>{`
-        .offerCarousel{ scrollbar-width:none; -ms-overflow-style:none; }
+        .offerCarousel{ scrollbar-width:none; -ms-overflow-style:none; cursor: grab; }
         .offerCarousel::-webkit-scrollbar{ display:none; height:0; width:0; }
+        .offerCarousel.is-dragging{ cursor: grabbing; user-select:none; }
         .heroVideo{
           filter: saturate(1.12) contrast(1.06) brightness(1.04);
           transform: scale(1.02);
-          pointer-events: none; /* ✅ клики идут через видео */
+          pointer-events: none;
         }
       `}</style>
 
@@ -593,7 +698,7 @@ const App = () => {
         </div>
       )}
 
-      {/* ===== HERO: autoplay muted + click anywhere for sound ===== */}
+      {/* ===== HERO (backend videos) ===== */}
       <section
         id="top"
         ref={heroRef}
@@ -601,10 +706,11 @@ const App = () => {
         style={{ height: "100svh" }}
       >
         <div className="absolute inset-0 z-0 bg-black">
+          {/* mobile */}
           <video
             ref={heroVideoMobRef}
             className="heroVideo block h-full w-full object-cover md:hidden"
-            src={VideoMob}
+            src={heroMobSrc || ""}
             autoPlay
             muted
             loop
@@ -612,10 +718,11 @@ const App = () => {
             preload="auto"
             onError={(e) => console.error("Hero mobile video error", e)}
           />
+          {/* desktop */}
           <video
             ref={heroVideoNoteRef}
             className="heroVideo hidden h-full w-full object-cover md:block"
-            src={VideoNote}
+            src={heroDeskSrc || ""}
             autoPlay
             muted
             loop
@@ -624,14 +731,17 @@ const App = () => {
             onError={(e) => console.error("Hero desktop video error", e)}
           />
 
-          <div className="absolute inset-0 bg-black/18" style={{ pointerEvents: "none" }} />
+          <div
+            className="absolute inset-0 bg-black/18"
+            style={{ pointerEvents: "none" }}
+          />
           <div
             className="absolute inset-0 bg-gradient-to-b from-black/25 via-black/10 to-black/35"
             style={{ pointerEvents: "none" }}
           />
         </div>
 
-        {/* ✅ КЛИК НА ВЕСЬ БАННЕР (всегда, но если звук уже включен — ничего не делает) */}
+        {/* ✅ клик на весь баннер -> включить звук */}
         <button
           type="button"
           onClick={enableHeroSound}
@@ -640,15 +750,10 @@ const App = () => {
           style={{ background: "transparent" }}
         />
 
-        {/* ✅ Иконка по центру пока звук выключен */}
         {!soundEnabled && (
           <>
             <div className="pointer-events-none absolute left-1/2 top-1/2 z-30 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/25 bg-black/45 p-5 text-white backdrop-blur">
-              <svg
-                viewBox="0 0 24 24"
-                className="h-9 w-9 fill-white"
-                aria-hidden="true"
-              >
+              <svg viewBox="0 0 24 24" className="h-9 w-9 fill-white">
                 <path d="M11 5.5 6.5 9H3a1 1 0 0 0-1 1v4a1 1 0 0 0 1 1h3.5L11 18.5a1 1 0 0 0 1.6-.8V6.3a1 1 0 0 0-1.6-.8z" />
                 <path d="M15.5 8.2a1 1 0 0 1 1.4 0 6 6 0 0 1 0 7.6 1 1 0 1 1-1.4-1.4 4 4 0 0 0 0-4.8 1 1 0 0 1 0-1.4z" />
                 <path d="M18.3 6a1 1 0 0 1 1.4 0 9 9 0 0 1 0 12 1 1 0 1 1-1.4-1.4 7 7 0 0 0 0-9.2 1 1 0 0 1 0-1.4z" />
@@ -668,7 +773,6 @@ const App = () => {
             </div>
           </div>
 
-          {/* ✅ кнопки выше клика */}
           <div className="absolute bottom-10 left-1/2 z-40 w-full -translate-x-1/2">
             <div className="flex flex-col items-center justify-center gap-3 sm:flex-row">
               <button
@@ -702,8 +806,8 @@ const App = () => {
         </h1>
 
         <p className="mx-auto mt-4 max-w-2xl text-base text-slate-600 md:text-lg">
-          Жакындарыңыз үчүн унутулгус видео куттуктоо жиберип 🤩🎁 Унутулгус эмоция ✨
-          тартуулаңыз 💐
+          Жакындарыңыз үчүн унутулгус видео куттуктоо жиберип 🤩🎁 Унутулгус эмоция
+          ✨ тартуулаңыз 💐
         </p>
       </section>
 
@@ -733,7 +837,12 @@ const App = () => {
           <div
             ref={carouselRef}
             className="offerCarousel mt-4 flex gap-4 overflow-x-auto pb-2"
-            style={{ WebkitOverflowScrolling: "touch" }}
+            style={{ WebkitOverflowScrolling: "touch", touchAction: "pan-y" }}
+            onPointerDown={onCarouselPointerDown}
+            onPointerMove={onCarouselPointerMove}
+            onPointerUp={onCarouselPointerUp}
+            onPointerLeave={onCarouselPointerLeave}
+            onClickCapture={onCarouselClickCapture}
           >
             {offers.map((o) => {
               const isInvite = o.key === "invite";
