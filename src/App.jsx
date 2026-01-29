@@ -1,9 +1,9 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 
 /**
  * baseURL: "" — чтобы работал Vite proxy (/api -> Django)
- * В проде ты можешь поставить baseURL: "https://kuttuktoo.kg"
+ * В проде можешь поставить baseURL: "https://kuttuktoo.kg"
  */
 const api = axios.create({
   baseURL: "",
@@ -29,7 +29,7 @@ const App = () => {
     desktop_src: "",
   });
 
-  // ✅ autoplay всегда БЕЗ ЗВУКА, звук включаем только по клику
+  // ✅ autoplay всегда без звука, звук только по клику
   const [soundEnabled, setSoundEnabled] = useState(false);
 
   const normalizeUrl = (u) => {
@@ -40,6 +40,43 @@ const App = () => {
 
   const toPriceText = (v) => String(v ?? "").trim();
 
+  // ===== media helpers =====
+  const isDesktopNow = () => {
+    if (typeof window === "undefined") return false;
+    if (!window.matchMedia) return false;
+    return window.matchMedia("(min-width: 768px)").matches;
+  };
+
+  const isTouchNow = () => {
+    if (typeof window === "undefined") return false;
+    // точнее чем ontouchstart
+    return (
+      window.matchMedia?.("(pointer: coarse)")?.matches ||
+      navigator.maxTouchPoints > 0
+    );
+  };
+
+  const safePause = (v) => {
+    if (!v) return;
+    try {
+      v.pause();
+    } catch {}
+  };
+
+  const safePlay = async (v) => {
+    if (!v) return false;
+    try {
+      const p = v.play?.();
+      if (p && typeof p.then === "function") await p;
+      return true;
+    } catch (e) {
+      // мобилки часто кидают NotAllowedError — это нормально
+      console.error(e);
+      return false;
+    }
+  };
+
+  // ===== Fetch =====
   useEffect(() => {
     let cancelled = false;
 
@@ -56,7 +93,6 @@ const App = () => {
 
         if (cancelled) return;
 
-        // ===== settings =====
         const s = sRes?.data || {};
         setSettings({
           brand_name: String(s.brand_name || ""),
@@ -66,7 +102,6 @@ const App = () => {
           logo_url: normalizeUrl(s.logo_url || ""),
         });
 
-        // ===== offers =====
         const list = Array.isArray(oRes?.data) ? oRes.data : [];
         const mapped = list
           .map((x) => {
@@ -102,15 +137,11 @@ const App = () => {
         mapped.sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
         setOffers(mapped);
 
-        // ===== hero videos =====
         const hvList = Array.isArray(hvRes?.data) ? hvRes.data : [];
         const first = hvList?.[0] || {};
-        const mSrc = normalizeUrl(first.mobile_src || "");
-        const dSrc = normalizeUrl(first.desktop_src || "");
-
         setHeroVideos({
-          mobile_src: mSrc,
-          desktop_src: dSrc,
+          mobile_src: normalizeUrl(first.mobile_src || ""),
+          desktop_src: normalizeUrl(first.desktop_src || ""),
         });
 
         if (!mapped.length) {
@@ -160,7 +191,6 @@ const App = () => {
       const hero = heroRef.current;
       const heroH = hero ? hero.getBoundingClientRect().height : 0;
       const y = window.scrollY || 0;
-
       const threshold = Math.max(220, heroH * 0.85);
       setShowHeader(y >= threshold);
     };
@@ -181,15 +211,9 @@ const App = () => {
     };
   }, []);
 
-  // ===== Hero video control (autoplay muted + click to enable sound) =====
+  // ===== Hero video control =====
   const heroVideoMobRef = useRef(null);
   const heroVideoNoteRef = useRef(null);
-
-  const isDesktopNow = () => {
-    if (typeof window === "undefined") return false;
-    if (!window.matchMedia) return false;
-    return window.matchMedia("(min-width: 768px)").matches;
-  };
 
   const getActiveHeroVideo = () =>
     isDesktopNow() ? heroVideoNoteRef.current : heroVideoMobRef.current;
@@ -197,68 +221,61 @@ const App = () => {
   const getInactiveHeroVideo = () =>
     isDesktopNow() ? heroVideoMobRef.current : heroVideoNoteRef.current;
 
-  const safePause = (v) => {
-    if (!v) return;
-    try {
-      v.pause();
-    } catch {}
-  };
-
-  const safePlay = async (v) => {
-    if (!v) return;
-    try {
-      const p = v.play?.();
-      if (p && typeof p.then === "function") await p;
-    } catch (e) {
-      console.error(e);
-    }
+  const stopBothHero = () => {
+    [heroVideoMobRef.current, heroVideoNoteRef.current].forEach((v) => {
+      if (!v) return;
+      try {
+        v.muted = true;
+        v.pause();
+        v.currentTime = 0;
+      } catch {}
+    });
   };
 
   const syncHero = async () => {
     const active = getActiveHeroVideo();
     const inactive = getInactiveHeroVideo();
-
     safePause(inactive);
 
     if (showHeader) {
-      [heroVideoMobRef.current, heroVideoNoteRef.current].forEach((v) => {
-        if (!v) return;
-        try {
-          v.muted = true;
-          v.pause();
-          v.currentTime = 0;
-        } catch {}
-      });
+      stopBothHero();
       return;
     }
 
-    if (active) {
-      try {
-        active.muted = !soundEnabled;
-        active.volume = 1;
-      } catch {}
-      await safePlay(active);
-    }
+    if (!active) return;
+
+    try {
+      active.muted = !soundEnabled;
+      active.volume = 1;
+      active.playsInline = true;
+    } catch {}
+
+    await safePlay(active);
   };
 
+  // ✅ при смене режима / скролле
   useEffect(() => {
     let raf = 0;
-
     raf = requestAnimationFrame(() => {
       syncHero();
     });
 
-    const onResize = () => {
-      syncHero();
-    };
-
+    const onResize = () => syncHero();
     window.addEventListener("resize", onResize);
+
     return () => {
       if (raf) cancelAnimationFrame(raf);
       window.removeEventListener("resize", onResize);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showHeader, soundEnabled, heroVideos.mobile_src, heroVideos.desktop_src]);
+
+  // ✅ мобильный автозапуск часто требует повторного play на loadedmetadata
+  const onHeroMetaLoaded = async () => {
+    if (showHeader) return;
+    // На ПК и так ок, но это не мешает
+    await syncHero();
+  };
 
   const enableHeroSound = async () => {
     if (soundEnabled) return;
@@ -328,19 +345,20 @@ const App = () => {
     return undefined;
   }, [modalOpen, activeVideo]);
 
-  // ===== Carousel (drag mouse + клики) =====
+  // ===== Carousel =====
   const carouselRef = useRef(null);
-  const positionsRef = useRef([]);
-  const animRef = useRef(0);
-  const isAnimatingRef = useRef(false);
-  const [activeIndex, setActiveIndex] = useState(0);
+
+  // ✅ drag мышкой — только на desktop (не touch)
+  const allowMouseDrag = useMemo(() => {
+    // На мобилке не трогаем, чтобы свайп работал идеально
+    return isDesktopNow() && !isTouchNow();
+  }, []);
 
   const dragRef = useRef({
     isDown: false,
     startX: 0,
     startLeft: 0,
     moved: false,
-    captured: false,
     pointerId: null,
   });
 
@@ -355,123 +373,6 @@ const App = () => {
     }, 220);
   };
 
-  const collectPositions = () => {
-    const el = carouselRef.current;
-    if (!el) return;
-    const cards = Array.from(el.querySelectorAll("[data-card='offer']"));
-    positionsRef.current = cards.map((c) => c.offsetLeft);
-  };
-
-  const stopAnimation = () => {
-    if (animRef.current) {
-      cancelAnimationFrame(animRef.current);
-      animRef.current = 0;
-    }
-    isAnimatingRef.current = false;
-  };
-
-  const getNearestIndex = () => {
-    const el = carouselRef.current;
-    const pos = positionsRef.current;
-    if (!el || !pos.length) return 0;
-
-    const left = el.scrollLeft;
-
-    let best = 0;
-    let bestDist = Infinity;
-    for (let i = 0; i < pos.length; i += 1) {
-      const d = Math.abs(pos[i] - left);
-      if (d < bestDist) {
-        bestDist = d;
-        best = i;
-      }
-    }
-    return best;
-  };
-
-  const easeInOut = (t) =>
-    t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-
-  const animateScrollTo = (targetLeft, durationMs = 520) => {
-    const el = carouselRef.current;
-    if (!el) return;
-
-    stopAnimation();
-
-    const startLeft = el.scrollLeft;
-    const delta = targetLeft - startLeft;
-    if (Math.abs(delta) < 0.5) return;
-
-    isAnimatingRef.current = true;
-    const startTime = performance.now();
-
-    const tick = (now) => {
-      if (!isAnimatingRef.current) return;
-
-      const t = Math.min(1, (now - startTime) / durationMs);
-      const k = easeInOut(t);
-      el.scrollLeft = startLeft + delta * k;
-
-      if (t < 1) {
-        animRef.current = requestAnimationFrame(tick);
-      } else {
-        animRef.current = 0;
-        isAnimatingRef.current = false;
-        el.scrollLeft = targetLeft;
-        collectPositions();
-        setActiveIndex(getNearestIndex());
-      }
-    };
-
-    animRef.current = requestAnimationFrame(tick);
-  };
-
-  useEffect(() => {
-    let raf1 = 0;
-    let raf2 = 0;
-
-    const init = () => {
-      collectPositions();
-      setActiveIndex(getNearestIndex());
-    };
-
-    raf1 = requestAnimationFrame(() => {
-      raf2 = requestAnimationFrame(init);
-    });
-
-    const el = carouselRef.current;
-    if (!el) return undefined;
-
-    let raf = 0;
-    const onScroll = () => {
-      if (isAnimatingRef.current) return;
-      if (raf) return;
-
-      raf = requestAnimationFrame(() => {
-        raf = 0;
-        collectPositions();
-        setActiveIndex(getNearestIndex());
-      });
-    };
-
-    const onResize = () => {
-      collectPositions();
-      setActiveIndex(getNearestIndex());
-    };
-
-    el.addEventListener("scroll", onScroll, { passive: true });
-    window.addEventListener("resize", onResize);
-
-    return () => {
-      if (raf1) cancelAnimationFrame(raf1);
-      if (raf2) cancelAnimationFrame(raf2);
-      if (raf) cancelAnimationFrame(raf);
-      stopAnimation();
-      el.removeEventListener("scroll", onScroll);
-      window.removeEventListener("resize", onResize);
-    };
-  }, [offers.length]);
-
   useEffect(() => {
     return () => {
       if (blockClickTimerRef.current) clearTimeout(blockClickTimerRef.current);
@@ -479,22 +380,23 @@ const App = () => {
   }, []);
 
   const onCarouselPointerDown = (e) => {
+    if (!allowMouseDrag) return;
+
     const el = carouselRef.current;
     if (!el) return;
 
     if (e.pointerType === "mouse" && e.button !== 0) return;
 
-    stopAnimation();
-
     dragRef.current.isDown = true;
     dragRef.current.startX = e.clientX;
     dragRef.current.startLeft = el.scrollLeft;
     dragRef.current.moved = false;
-    dragRef.current.captured = false;
     dragRef.current.pointerId = e.pointerId;
   };
 
   const onCarouselPointerMove = (e) => {
+    if (!allowMouseDrag) return;
+
     const el = carouselRef.current;
     if (!el) return;
     if (!dragRef.current.isDown) return;
@@ -505,14 +407,6 @@ const App = () => {
 
     if (!dragRef.current.moved && absDx > 6) {
       dragRef.current.moved = true;
-
-      if (!dragRef.current.captured) {
-        try {
-          el.setPointerCapture?.(e.pointerId);
-          dragRef.current.captured = true;
-        } catch {}
-      }
-
       el.classList.add("is-dragging");
     }
 
@@ -523,6 +417,8 @@ const App = () => {
   };
 
   const finishDrag = () => {
+    if (!allowMouseDrag) return;
+
     const el = carouselRef.current;
     if (!el) return;
 
@@ -534,22 +430,22 @@ const App = () => {
     el.classList.remove("is-dragging");
 
     if (wasMoved) setBlockClick();
-
-    collectPositions();
-    setActiveIndex(getNearestIndex());
   };
 
   const onCarouselPointerUp = () => {
+    if (!allowMouseDrag) return;
     if (!dragRef.current.isDown) return;
     finishDrag();
   };
 
   const onCarouselPointerLeave = () => {
+    if (!allowMouseDrag) return;
     if (!dragRef.current.isDown) return;
     finishDrag();
   };
 
   const onCarouselClickCapture = (e) => {
+    if (!allowMouseDrag) return;
     if (blockClickRef.current) {
       e.preventDefault();
       e.stopPropagation();
@@ -618,7 +514,7 @@ const App = () => {
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <style>{`
-        .offerCarousel{ scrollbar-width:none; -ms-overflow-style:none; cursor: grab; }
+        .offerCarousel{ scrollbar-width:none; -ms-overflow-style:none; }
         .offerCarousel::-webkit-scrollbar{ display:none; height:0; width:0; }
         .offerCarousel.is-dragging{ cursor: grabbing; user-select:none; }
         .heroVideo{
@@ -716,8 +612,10 @@ const App = () => {
             loop
             playsInline
             preload="auto"
+            onLoadedMetadata={onHeroMetaLoaded}
             onError={(e) => console.error("Hero mobile video error", e)}
           />
+
           {/* desktop */}
           <video
             ref={heroVideoNoteRef}
@@ -728,6 +626,7 @@ const App = () => {
             loop
             playsInline
             preload="auto"
+            onLoadedMetadata={onHeroMetaLoaded}
             onError={(e) => console.error("Hero desktop video error", e)}
           />
 
@@ -741,10 +640,14 @@ const App = () => {
           />
         </div>
 
-        {/* ✅ клик на весь баннер -> включить звук */}
+        {/* ✅ клик на весь баннер -> включить звук + гарантировать play на мобилке */}
         <button
           type="button"
-          onClick={enableHeroSound}
+          onClick={async () => {
+            // важный хак: на мобилке первый тап даёт user-gesture — можно форснуть play
+            await syncHero();
+            await enableHeroSound();
+          }}
           className="absolute inset-0 z-20"
           aria-label="Включить звук"
           style={{ background: "transparent" }}
@@ -777,16 +680,20 @@ const App = () => {
             <div className="flex flex-col items-center justify-center gap-3 sm:flex-row">
               <button
                 type="button"
-                onClick={() => scrollToId("offers")}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  scrollToId("offers");
+                }}
                 className="w-full max-w-[320px] rounded-2xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white hover:bg-blue-700 sm:w-auto"
               >
                 Тарифтерди көрүү
               </button>
               <button
                 type="button"
-                onClick={() =>
-                  openWhatsApp("Саламатсызбы! Видео куттуктоо керек эле.")
-                }
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openWhatsApp("Саламатсызбы! Видео куттуктоо керек эле.");
+                }}
                 className="w-full max-w-[320px] rounded-2xl border border-white/30 bg-white/10 px-5 py-3 text-sm font-semibold text-white backdrop-blur hover:bg-white/15 sm:w-auto"
               >
                 WhatsAppка жазуу
@@ -837,12 +744,23 @@ const App = () => {
           <div
             ref={carouselRef}
             className="offerCarousel mt-4 flex gap-4 overflow-x-auto pb-2"
-            style={{ WebkitOverflowScrolling: "touch", touchAction: "pan-y" }}
+            style={{
+              WebkitOverflowScrolling: "touch",
+              // ✅ НА МОБИЛКЕ: горизонтальный свайп работает
+              touchAction: "pan-x",
+            }}
+            // ✅ mouse-drag only
             onPointerDown={onCarouselPointerDown}
             onPointerMove={onCarouselPointerMove}
             onPointerUp={onCarouselPointerUp}
             onPointerLeave={onCarouselPointerLeave}
-            onClickCapture={onCarouselClickCapture}
+            onClickCapture={(e) => {
+              if (!allowMouseDrag) return;
+              if (blockClickRef.current) {
+                e.preventDefault();
+                e.stopPropagation();
+              }
+            }}
           >
             {offers.map((o) => {
               const isInvite = o.key === "invite";
@@ -902,7 +820,10 @@ const App = () => {
 
                       <ul className="mt-5 flex flex-1 flex-col gap-3 text-sm">
                         {(o.list || []).map((t, i) => (
-                          <li key={`${o.key}-${i}`} className="flex items-start gap-3">
+                          <li
+                            key={`${o.key}-${i}`}
+                            className="flex items-start gap-3"
+                          >
                             <span className="mt-0.5 inline-flex h-5 w-5 flex-none items-center justify-center rounded-full bg-emerald-100 text-emerald-700">
                               ✓
                             </span>
