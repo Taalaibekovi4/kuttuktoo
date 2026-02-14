@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
+import nizImg from "./img/niz.svg";
 
 /**
  * baseURL: "" — чтобы работал Vite proxy (/api -> Django)
@@ -171,7 +172,22 @@ const App = () => {
 
   const scrollToId = (id) => {
     const el = document.getElementById(id);
-    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (!el) return;
+    const start = window.scrollY || document.documentElement.scrollTop;
+    const target = el.getBoundingClientRect().top + start;
+    const distance = target - start;
+    const duration = 600;
+    const startTime = performance.now();
+
+    const easeOutCubic = (t) => 1 - (1 - t) ** 3;
+
+    const step = (now) => {
+      const elapsed = now - startTime;
+      const progress = Math.min(elapsed / duration, 1);
+      window.scrollTo(0, start + distance * easeOutCubic(progress));
+      if (progress < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
   };
 
   const openWhatsApp = (text) => {
@@ -270,10 +286,8 @@ const App = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showHeader, soundEnabled, heroVideos.mobile_src, heroVideos.desktop_src]);
 
-  // ✅ мобильный автозапуск часто требует повторного play на loadedmetadata
   const onHeroMetaLoaded = async () => {
     if (showHeader) return;
-    // На ПК и так ок, но это не мешает
     await syncHero();
   };
 
@@ -522,6 +536,12 @@ const App = () => {
           transform: scale(1.02);
           pointer-events: none;
         }
+        @keyframes bounce-down {
+          0%, 100% { transform: translateY(0); }
+          50% { transform: translateY(6px); }
+        }
+        .arrow-bounce { animation: bounce-down 1.5s ease-in-out infinite; }
+        .arrow-bounce:active { animation: none; transform: translateY(4px); }
       `}</style>
 
       {/* ===== Header ===== */}
@@ -602,7 +622,7 @@ const App = () => {
         style={{ height: "100svh" }}
       >
         <div className="absolute inset-0 z-0 bg-black">
-          {/* mobile */}
+          {/* mobile — playsInline для iOS, onTouchStart на overlay запускает видео */}
           <video
             ref={heroVideoMobRef}
             className="heroVideo block h-full w-full object-cover md:hidden"
@@ -613,6 +633,7 @@ const App = () => {
             playsInline
             preload="auto"
             onLoadedMetadata={onHeroMetaLoaded}
+            onLoadedData={onHeroMetaLoaded}
             onError={(e) => console.error("Hero mobile video error", e)}
           />
 
@@ -640,18 +661,38 @@ const App = () => {
           />
         </div>
 
-        {/* ✅ клик на весь баннер -> включить звук + гарантировать play на мобилке */}
-        <button
-          type="button"
-          onClick={async () => {
-            // важный хак: на мобилке первый тап даёт user-gesture — можно форснуть play
-            await syncHero();
-            await enableHeroSound();
-          }}
-          className="absolute inset-0 z-20"
-          aria-label="Включить звук"
-          style={{ background: "transparent" }}
-        />
+        {/* ✅ клик/тап — включить звук + запустить видео (на мобилке нужен user gesture) */}
+        {!soundEnabled && (
+          <button
+            type="button"
+            onClick={async () => {
+              const active = getActiveHeroVideo();
+              if (active) {
+                try {
+                  active.muted = false;
+                  active.volume = 1;
+                  active.playsInline = true;
+                  active.play?.();
+                } catch {}
+              }
+              await syncHero();
+              await enableHeroSound();
+            }}
+            onTouchStart={() => {
+              const active = getActiveHeroVideo();
+              if (active && active.paused) {
+                try {
+                  active.muted = true;
+                  active.playsInline = true;
+                  active.play?.();
+                } catch {}
+              }
+            }}
+            className="absolute inset-0 z-20"
+            aria-label="Включить звук"
+            style={{ background: "transparent" }}
+          />
+        )}
 
         {!soundEnabled && (
           <>
@@ -669,14 +710,14 @@ const App = () => {
           </>
         )}
 
-        <div className="relative z-10 mx-auto h-full w-full max-w-6xl px-4">
-          <div className="absolute right-0 top-6 z-40">
+        <div className="relative z-30 mx-auto h-full w-full max-w-6xl px-4 pointer-events-none">
+          <div className="absolute right-0 top-6 z-40 pointer-events-auto">
             <div className="inline-flex items-center gap-2 rounded-full border border-white/30 bg-white/10 px-3 py-1 text-xs font-semibold text-white backdrop-blur">
               Куттуктоо видеолору
             </div>
           </div>
 
-          <div className="absolute bottom-10 left-1/2 z-40 w-full -translate-x-1/2">
+          <div className="pointer-events-auto absolute bottom-10 left-1/2 z-40 w-full -translate-x-1/2">
             <div className="flex flex-col items-center justify-center gap-3 sm:flex-row">
               <button
                 type="button"
@@ -684,7 +725,7 @@ const App = () => {
                   e.stopPropagation();
                   scrollToId("offers");
                 }}
-                className="w-full max-w-[320px] rounded-2xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white hover:bg-blue-700 sm:w-auto"
+                className="relative z-10 w-full max-w-[320px] rounded-2xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white hover:bg-blue-700 sm:w-auto"
               >
                 Тарифтерди көрүү
               </button>
@@ -694,12 +735,25 @@ const App = () => {
                   e.stopPropagation();
                   openWhatsApp("Саламатсызбы! Видео куттуктоо керек эле.");
                 }}
-                className="w-full max-w-[320px] rounded-2xl border border-white/30 bg-white/10 px-5 py-3 text-sm font-semibold text-white backdrop-blur hover:bg-white/15 sm:w-auto"
+                className="relative z-10 w-full max-w-[320px] rounded-2xl border border-white/30 bg-white/10 px-5 py-3 text-sm font-semibold text-white backdrop-blur hover:bg-white/15 sm:w-auto"
               >
                 WhatsAppка жазуу
               </button>
             </div>
           </div>
+
+          {/* Стрелка вниз — скролл на 1 секцию */}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              scrollToId("intro");
+            }}
+            className="arrow-bounce pointer-events-auto absolute right-4 top-1/2 z-40 flex h-14 w-14 -translate-y-1/2 items-center justify-center rounded-full border border-white/40 bg-transparent transition hover:scale-105 hover:bg-white/10 active:scale-95"
+            aria-label="Төмөн скролл"
+          >
+            <img src={nizImg} alt="" className="h-7 w-7 object-contain invert" />
+          </button>
         </div>
       </section>
 
@@ -746,8 +800,8 @@ const App = () => {
             className="offerCarousel mt-4 flex gap-4 overflow-x-auto pb-2"
             style={{
               WebkitOverflowScrolling: "touch",
-              // ✅ НА МОБИЛКЕ: горизонтальный свайп работает
-              touchAction: "pan-x",
+              // ✅ pan-x pan-y — и горизонтальный свайп, и вертикальный скролл страницы
+              touchAction: "pan-x pan-y",
             }}
             // ✅ mouse-drag only
             onPointerDown={onCarouselPointerDown}
